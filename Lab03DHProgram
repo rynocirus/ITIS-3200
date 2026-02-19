@@ -38,47 +38,54 @@ G = 2
 
 # Implement logic for PRNG function here
 class SecurePRNG:
+    """Stateful PRNG seeded from DH shared secret. Updates state with SHA-256 each block
+    to provide rollback resistance (one-way state progression)."""
 
-    def __init__(self, seed_int):
-        # TODO: Initalize the SecurePRNG with the shared secret (seed_int) calculated from Diffie-Hellman key exchange.
-        
-    def generate(self, n_bytes):
-        # TODO: Generates n bytes while ensuring Rollback Resistance. 
+    def __init__(self, seed_int: int):
+        seed_bytes = seed_int.to_bytes((seed_int.bit_length() + 7) // 8 or 1, "big")
+        self.state = hashlib.sha256(seed_bytes).digest()  # 32-byte state
+
+    def generate(self, n_bytes: int) -> bytes:
         output = b""
         while len(output) < n_bytes:
-            # 1. Produce keystream block from current state
-
-            # 2. Update state immediately after with a hash function (One-way progression)
-            
+            block = hashlib.sha256(self.state).digest()   # keystream block
+            output += block
+            self.state = hashlib.sha256(self.state + block).digest()  # one-way update
         return output[:n_bytes]
 
 
-
-def xor_crypt(data, prng):
-    # TODO: Implement Simple XOR stream cipher logic.
+def xor_crypt(data: bytes, prng: "SecurePRNG") -> bytes:
+    """XOR stream cipher: plaintext/ciphertext XOR keystream."""
+    keystream = prng.generate(len(data))
+    return bytes([b ^ k for b, k in zip(data, keystream)])
 
 
 
 # --- PART B: COMMUNICATION PROTOCOL ---
 
-class Entity:
-    # TODO: Calculate public and private keys with global P and G.
 
-    def __init__(self, name):
+# --- PART B: COMMUNICATION PROTOCOL ---
+
+class Entity:
+    """Diffie-Hellman participant with a session PRNG for XOR stream cipher."""
+
+    def __init__(self, name: str):
         self.name = name
-        self.private_key =  
-        self.public_key =  
+        self.private_key = secrets.randbelow(P - 3) + 2  # 2..P-2
+        self.public_key = pow(G, self.private_key, P)
         self.session_prng = None
 
-    def get_public_hex(self):
+    def get_public_hex(self) -> str:
         return hex(self.public_key)
-    
-    # TODO: calculate and initialize shared secret with SecurePRNG
-    def establish_session(self, partner_pub_hex):
-        partner_pub = 
-        shared_secret = 
+
+    def establish_session(self, partner_pub_hex: str):
+        partner_pub = int(partner_pub_hex, 16)
+        shared_secret = pow(partner_pub, self.private_key, P)
         self.session_prng = SecurePRNG(shared_secret)
 
+
+
+# --- DO NOT MODIFY THIS CLASS --- #
 
 
 # --- DO NOT MODIFY THIS CLASS --- #
@@ -100,37 +107,69 @@ class Network:
 # Implement logic for Mallory
 class Mallory:
     def __init__(self):
-        self.private_key =
-        self.public_hex =
-        
-        # Mallory maintains TWO sessions
+        self.private_key = secrets.randbelow(P - 3) + 2
+        self.public_hex = hex(pow(G, self.private_key, P))
+
+        # Mallory maintains TWO sessions (one with Alice, one with Bob)
         self.alice_prng = None
         self.bob_prng = None
 
     def intercept(self, sender, recipient, payload):
-        # 1. Implement Logic for Key Exchange Interception
+        # 1) Key exchange interception
         if isinstance(payload, str) and payload.startswith("0x"):
             remote_pub = int(payload, 16)
             my_shared_secret = pow(remote_pub, self.private_key, P)
 
-            # TODO: If the sender is alice, generate a session PRNG with Alice. 
-            # If the sender is Bob, generate a session PRNG with Bob.
-    
-            return self.public_hex # Return Mallory's key instead to generate session PRNGs with Alice and Bob
-        
-        # 2. Implement Logic for Message Interception/Modification
+            if sender.lower() == "alice":
+                self.alice_prng = SecurePRNG(my_shared_secret)
+                print(f"[ATTACK] Mallory intercepted public key destined for {recipient}!")
+                print_info("Mallory's Shared Secret with Alice", my_shared_secret)
+                print("[ATTACK] Mallory forwarding HER public key to Bob...")
+            elif sender.lower() == "bob":
+                self.bob_prng = SecurePRNG(my_shared_secret)
+                print(f"[ATTACK] Mallory intercepted public key destined for {recipient}!")
+                print_info("Mallory's Shared Secret with Bob", my_shared_secret)
+                print("[ATTACK] Mallory forwarding HER public key to Alice...")
+
+            return self.public_hex
+
+        # 2) Encrypted message interception/modification
         if isinstance(payload, bytes):
             print(f"[MALLORY] Intercepting Encrypted Message from {sender}...")
 
-            # TODO: Decrypt the message using the appropriate session PRNG (Hint: Alice is the sender)
-            # Print the plaintext message to the console for Mallory's spying purposes.
+            # Decrypt using sender-side PRNG
+            if sender.lower() == "alice" and self.alice_prng is not None:
+                plaintext = xor_crypt(payload, self.alice_prng)
+            elif sender.lower() == "bob" and self.bob_prng is not None:
+                plaintext = xor_crypt(payload, self.bob_prng)
+            else:
+                return payload
 
-            # Modify the plaintext message in some way
+            try:
+                pt_str = plaintext.decode()
+            except Exception:
+                pt_str = str(plaintext)
+            print_info("Mallory Decrypted Plaintext", pt_str)
 
-            # Then use the PRNG shared with bob to re-encrypt and return the message for Bob
+            # Modify plaintext (example: change 9pm -> 3am)
+            modified = plaintext.replace(b"9pm", b"3am")
+            try:
+                mod_str = modified.decode()
+            except Exception:
+                mod_str = str(modified)
+            print_info("Mallory Modified Payload", mod_str)
+
+            # Re-encrypt using recipient-side PRNG
+            if recipient.lower() == "bob" and self.bob_prng is not None:
+                return xor_crypt(modified, self.bob_prng)
+            if recipient.lower() == "alice" and self.alice_prng is not None:
+                return xor_crypt(modified, self.alice_prng)
 
         return payload
 
+
+
+# --- DO NOT MODIFY THIS FUNCTION --- #
 
 
 # --- DO NOT MODIFY THIS FUNCTION --- #
@@ -170,7 +209,7 @@ def main():
     print("   [Status]: Shared Secret computed: S = B^a mod P = A^b mod P")
     
     print_step("Step 3: Secure Message Transmission")
-    message = b"<INPUT YOUR MESSAGE HERE>" # Put in your test message here
+    message = b"I like cars" # Put in your test message here
     encrypted_msg = xor_crypt(message, alice.session_prng)
     delivered_data = net.send("Alice", "Bob", encrypted_msg)
     final_message = xor_crypt(delivered_data, bob.session_prng)
